@@ -1,20 +1,3 @@
-"""
-IP2Location to MaxMind MMDB Converter
-
-This script converts IP2Location LITE CSV database to Maxmind MMDB format.
-It supports both country-level and city-level databases.
-
-Usage:
-    python3 convert.py <IP2Location LITE DB1 or DB11 CSV file>
-
-Requirements:
-    - Python 3.5+
-    - tqdm library for progress bars
-
-This script is based on the original work by antonvlad999 (https://github.com/antonvlad999/convert-ip2location-geolite2)
-and has been modified and improved for better performance and usability.
-"""
-
 import os
 import sys
 import ipaddress
@@ -32,27 +15,24 @@ import logging
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 定义常量 - 这些常量用于MMDB文件格式中的不同数据类型
+# 定义常量
 STRING_TYPE = 2 << 5
 MAP_TYPE = 7 << 5
 POINTER_TYPE = 1 << 5
 UINT16_TYPE = 5 << 5
 UINT32_TYPE = 6 << 5
-UINT64_TYPE = 9 - 7
+UINT64_TYPE = 2
 ARRAY_TYPE = 11 - 7
 EXTENDED_TYPE = 0
 DOUBLE_TYPE = 3 << 5
 
 def no2ip(iplong):
-    """Convert a long integer to an IP address string."""
     return socket.inet_ntoa(struct.pack('!I', int(iplong)))
 
 def ip2no(ip):
-    """Convert an IP address string to a long integer."""
     return struct.unpack("!I", socket.inet_aton(ip))[0]
 
 def myprint(d):
-    """Print a nested dictionary."""
     stack = list(d.items())
     visited = set()
     while stack:
@@ -65,10 +45,6 @@ def myprint(d):
             visited.add(k)
 
 def travtree(hash_dict, level, trace):
-    """
-    Traverse the binary tree and build the data structure.
-    This function is crucial for creating the MMDB search tree.
-    """
     global data
     leftval = rightval = -1
     leftleaf = rightleaf = 0
@@ -95,108 +71,45 @@ def travtree(hash_dict, level, trace):
     return ownoffset
 
 def custom_sprintf(num1):
-    """Convert an integer to its binary string representation."""
     return format(int(num1), '08b')
 
 def print_double(num):
-    """Convert a float to its binary representation."""
     return struct.pack(">d", float(num))
 
 def print_byte(num):
-    """Convert an integer to a single byte, removing null bytes."""
-    return struct.pack('I', int(num)).rstrip(b'\x00')
-
-def print_byte1(num):
-    """Convert an integer to a single byte."""
     return struct.pack('B', int(num))
 
 def print_uint(num):
-    """Convert an unsigned integer to its binary representation."""
-    s = b""
-    while num > 0:
-        num2 = int(num) & 0xFF
-        s = print_byte(num2) + s
-        num = int(num) >> 8
-    return s
+    if num < 256:
+        return struct.pack('>B', num)
+    elif num < 65536:
+        return struct.pack('>H', num)
+    elif num < 4294967296:
+        return struct.pack('>I', num)
+    else:
+        return struct.pack('>Q', num)
 
 def print_pointer(num):
-    """
-    Create a pointer for the MMDB format.
-    This is used to reference data within the database.
-    """
-    global POINTER_TYPE
-    pointersize = -1
-    threebits = 0
-    balance = []
-
-    if num <= 2047:
-        pointersize = 0
-        threebits = num >> 8
-        balance = get_byte_array(num, 1)
-    elif num <= 526335:
-        pointersize = 1
-        num = num - 2048
-        threebits = num >> 16
-        balance = get_byte_array(num, 2)
-    elif num <= 134744063:
-        pointersize = 2
-        num = num - 526336
-        threebits = num >> 24
-        balance = get_byte_array(num, 3)
-    elif num <= 4294967295:
-        pointersize = 3
-        threebits = 0
-        balance = get_byte_array(num, 4)
+    if num < 2048:
+        return struct.pack('>I', (1 << 30) | num)[1:]
+    elif num < 526336:
+        return struct.pack('>I', (2 << 30) | (num - 2048))[1:]
+    elif num < 134217728:
+        return struct.pack('>I', (3 << 30) | (num - 526336))
     else:
-        raise Exception("Pointer value too large.\n")
-
-    pointersize = pointersize << 3
-    controlbyte = POINTER_TYPE | pointersize | threebits
-    s = print_byte(controlbyte)
-    for i in range(len(balance)):
-        s += print_byte(balance[i])
-    return s
+        raise ValueError("Pointer value too large")
 
 def get_byte_array(num, bytes_count):
-    """Convert a number to an array of bytes."""
-    bytesarr = []
-    for i in range(bytes_count):
-        tmp = int(num) & 0xFF
-        num = int(num) >> 8
-        bytesarr = ([tmp] + bytesarr)
-    return bytesarr
+    return num.to_bytes(bytes_count, byteorder='big')
 
 def print_node(leftdata, rightdata):
-    """
-    Create a node for the MMDB search tree.
-    The format differs slightly between country and city databases.
-    """
     global dbtype
-    mybytes = []
-    leftbytes = []
-    rightbytes = []
-    
     if dbtype == 'country':
-        leftbytes = get_byte_array(leftdata, 3)
-        rightbytes = get_byte_array(rightdata, 3)
-        mybytes = leftbytes + rightbytes
+        return struct.pack('>I', leftdata)[1:] + struct.pack('>I', rightdata)[1:]
     elif dbtype == 'city':
-        leftbytes = get_byte_array(leftdata, 4)
-        rightbytes = get_byte_array(rightdata, 4)
-        midbyte = (leftbytes[0] << 4) ^ rightbytes[0]
-        leftbytes = leftbytes[1:]
-        rightbytes = rightbytes[1:]
-        leftbytes.append(midbyte)
-        mybytes = leftbytes + rightbytes
-    
-    s = b""
-    for i in range(len(mybytes)):
-        s += print_byte1(mybytes[i])
-
-    return s
+        return struct.pack('>II', leftdata, rightdata)
 
 def keys_exists(element, *keys):
-    """Check if a series of keys exists in a nested dictionary."""
     if not isinstance(element, dict):
         raise AttributeError('keys_exists() expects dict as first argument.')
     if len(keys) == 0:
@@ -210,10 +123,51 @@ def keys_exists(element, *keys):
             return False
     return True
 
+def write_metadata(f, metadata):
+    f.write(struct.pack('B', MAP_TYPE | len(metadata)))
+    for key, value in metadata.items():
+        write_string(f, key)
+        if isinstance(value, int):
+            write_uint(f, value)
+        elif isinstance(value, str):
+            write_string(f, value)
+        elif isinstance(value, dict):
+            write_map(f, value)
+        elif isinstance(value, list):
+            write_array(f, value)
+
+def write_string(f, s):
+    b = s.encode('utf-8')
+    f.write(struct.pack('B', STRING_TYPE | len(b)))
+    f.write(b)
+
+def write_uint(f, num):
+    if num < 256:
+        f.write(struct.pack('BB', UINT16_TYPE | 1, num))
+    elif num < 65536:
+        f.write(struct.pack('>BH', UINT16_TYPE | 2, num))
+    elif num < 4294967296:
+        f.write(struct.pack('>BI', UINT32_TYPE | 4, num))
+    else:
+        f.write(struct.pack('>BQ', UINT64_TYPE | 8, num))
+
+def write_map(f, m):
+    f.write(struct.pack('B', MAP_TYPE | len(m)))
+    for k, v in m.items():
+        write_string(f, k)
+        if isinstance(v, str):
+            write_string(f, v)
+        elif isinstance(v, int):
+            write_uint(f, v)
+
+def write_array(f, arr):
+    f.write(struct.pack('BB', EXTENDED_TYPE | 0, ARRAY_TYPE))
+    f.write(struct.pack('B', len(arr)))
+    for item in arr:
+        write_string(f, item)
+
 def main():
-    global data, dbtype, POINTER_TYPE
-    
-    # 初始化数据结构
+    global data, dbtype
     tokens = {"country": 0, "iso_code": 0, "names": 0, "en": 0, "-": 0}
     tokens2 = {"city": 0, "location": 0, "postal": 0, "latitude": 0, "longitude": 0, "code": 0, "subdivisions": 0}
     latlongs = {}
@@ -225,18 +179,17 @@ def main():
     cityoffset = {}
     btree = {}
     data = {}
-    datastartmarker = print_byte1(0) * 16
+    datastartmarker = b'\x00' * 16
     datastartmarkerlength = len(datastartmarker)
 
     if len(sys.argv) > 1:
         filename = sys.argv[1]
         if filename.lower().endswith('.csv'):
-            # 读取和处理CSV文件
             with open(filename, 'r', encoding='utf-8') as f:
                 mycsv = csv.reader(f)
                 for row in tqdm(mycsv, desc="Processing CSV"):
                     therest = ''
-                    if len(row) == 10:  # 城市级数据
+                    if len(row) == 10:
                         dbtype = 'city'
                         for i in range(2, 6):
                             tokens[row[i]] = 0
@@ -245,12 +198,10 @@ def main():
                         tokens[row[8]] = 0
                         cities["|".join(row[2:9])] = 0
                         therest = "|".join([row[2], row[4], row[5], row[6], row[7], row[8]])
-                    else:  # 国家级数据
+                    else:
                         dbtype = 'country'
                         countries[row[2]] = row[3]
                         therest = row[2]
-                    
-                    # 处理IP范围
                     fromip = ip2no(row[0])
                     toip = ip2no(row[1])
                     startip = ipaddress.IPv4Address(fromip)
@@ -260,7 +211,6 @@ def main():
                     for cidr in ar1:
                         cidrdata.append(f'"{cidr}",{therest}')
 
-            # 处理CIDR数据
             logging.info("Processing CIDR data")
             for entry in tqdm(cidrdata, desc="Processing CIDR entries"):
                 regex_here1 = r"^\"([\d\.]+)\/(\d+)\",(.*)"
@@ -273,7 +223,6 @@ def main():
                     binarystrcidr = binarystr[0:int(cidr)]
                     sortbylength["GG" + binarystrcidr] = line_copy1
 
-            # 构建数据部分
             logging.info("Constructing data section")
             datasection = b""
             if dbtype == 'city':
@@ -290,7 +239,6 @@ def main():
                 controlbyte1 = DOUBLE_TYPE | 8
                 datasection += print_byte(controlbyte1) + print_double(float(key1))
 
-            # 处理国家或城市数据
             if dbtype == 'country':
                 for key2 in tqdm(sorted(countries), desc="Processing countries"):
                     countryoffset[key2] = len(datasection)
@@ -356,6 +304,7 @@ def main():
                     datasection += print_byte(controlbyte)
                     datasection += print_pointer(tokens["code"])
                     datasection += print_pointer(tokens[postcode])
+                    
                     datasection += print_pointer(tokens["subdivisions"])
                     myint = 1
                     controlbyte = EXTENDED_TYPE | myint
@@ -369,7 +318,6 @@ def main():
                     datasection += print_pointer(tokens["en"])
                     datasection += print_pointer(tokens[statename])
 
-            # 更新B树
             logging.info("Updating B-tree")
             for binarystrcidr in tqdm(sorted(sortbylength), desc="Updating B-tree"):
                 tmp_modify = binarystrcidr[2:]
@@ -381,19 +329,20 @@ def main():
                     current = current[key]
                 current[key] = sortbylength[binarystrcidr]
 
-            # 遍历B树并构建搜索树
             logging.info("Traversing B-tree")
             travtree(btree, 0, '')
 
-            # 计算节点总数和偏移量
             totalnodes = sum(len(level) for level in data.values())
             offsetnodes = {i: sum(len(data[j]) for j in range(i+1)) for i in range(len(data))}
 
-            # 写入MMDB文件
             logging.info("Writing to file")
             filename2 = filename + '.MMDB'
             with open(filename2, 'wb') as f:
-                # 写入搜索树节点
+                # Write MMDB header
+                f.write(b'\x00' * 16)
+                f.write(b'MaxMind.com')
+                f.write(bytes([0xab, 0xcd, 0xef]))
+
                 for i in tqdm(range(len(data)), desc="Writing nodes"):
                     for nodedata in data[i].values():
                         left, right = map(str, nodedata.split('#'))
@@ -416,15 +365,11 @@ def main():
                         
                         f.write(print_node(leftdata, rightdata))
 
-                # 写入数据开始标记和数据部分
                 f.write(datastartmarker)
                 f.write(datasection)
                 f.write(binascii.unhexlify(b'ABCDEF4D61784D696E642E636F6D'))
 
-                # 写入元数据
-                controlbyte = MAP_TYPE | 9
-                f.write(print_byte(controlbyte))
-
+                # Write metadata
                 metadata = {
                     "binary_format_major_version": 2,
                     "binary_format_minor_version": 0,
@@ -437,29 +382,7 @@ def main():
                     "record_size": 24 if dbtype == 'country' else 28
                 }
 
-                # 写入每个元数据字段
-                for key, value in metadata.items():
-                    f.write(print_byte(STRING_TYPE | len(key)) + key.encode())
-                    if isinstance(value, int):
-                        if value < 256:
-                            f.write(print_byte(UINT16_TYPE | 1) + print_byte(value))
-                        elif value < 65536:
-                            f.write(print_byte(UINT16_TYPE | 2) + print_uint(value))
-                        elif value < 4294967296:
-                            f.write(print_byte(UINT32_TYPE | 4) + print_uint(value))
-                        else:
-                            f.write(print_byte(EXTENDED_TYPE | 8) + print_byte(UINT64_TYPE) + print_uint(value))
-                    elif isinstance(value, str):
-                        f.write(print_byte(STRING_TYPE | len(value)) + value.encode())
-                    elif isinstance(value, dict):
-                        f.write(print_byte(MAP_TYPE | len(value)))
-                        for sub_key, sub_value in value.items():
-                            f.write(print_byte(STRING_TYPE | len(sub_key)) + sub_key.encode())
-                            f.write(print_byte(STRING_TYPE | len(sub_value)) + sub_value.encode())
-                    elif isinstance(value, list):
-                        f.write(print_byte(EXTENDED_TYPE | 1) + print_byte(ARRAY_TYPE))
-                        for item in value:
-                            f.write(print_byte(STRING_TYPE | len(item)) + item.encode())
+                write_metadata(f, metadata)
 
             logging.info(f"You have successfully converted {filename} to {filename2}.")
             print(f"You can now use {filename2} with any MaxMind API which supports the GeoLite2 format.\n")
