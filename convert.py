@@ -1,104 +1,149 @@
-import os, sys, ipaddress, csv, socket, struct, re, binascii, time, json
+"""
+IP2Location to MaxMind MMDB Converter
 
-# Custom functions start at here
+This script converts IP2Location LITE CSV database to Maxmind MMDB format.
+It supports both country-level and city-level databases.
+
+Usage:
+    python3 convert.py <IP2Location LITE DB1 or DB11 CSV file>
+
+Requirements:
+    - Python 3.5+
+    - tqdm library for progress bars
+
+This script is based on the original work by antonvlad999 (https://github.com/antonvlad999/convert-ip2location-geolite2)
+and has been modified and improved for better performance and usability.
+"""
+
+import os
+import sys
+import ipaddress
+import csv
+import socket
+import struct
+import re
+import binascii
+import time
+import json
+import random
+from tqdm import tqdm
+import logging
+
+# 设置日志记录
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# 定义常量 - 这些常量用于MMDB文件格式中的不同数据类型
+STRING_TYPE = 2 << 5
+MAP_TYPE = 7 << 5
+POINTER_TYPE = 1 << 5
+UINT16_TYPE = 5 << 5
+UINT32_TYPE = 6 << 5
+UINT64_TYPE = 9 - 7
+ARRAY_TYPE = 11 - 7
+EXTENDED_TYPE = 0
+DOUBLE_TYPE = 3 << 5
+
 def no2ip(iplong):
-    return (socket.inet_ntoa(struct.pack('!I', int(iplong))))
+    """Convert a long integer to an IP address string."""
+    return socket.inet_ntoa(struct.pack('!I', int(iplong)))
 
 def ip2no(ip):
-    return (struct.unpack("N",socket.inet_aton(ip)))
+    """Convert an IP address string to a long integer."""
+    return struct.unpack("!I", socket.inet_aton(ip))[0]
 
-def myprint(d): 
-    stack = list(d.items()) 
-    visited = set() 
-    while stack: 
-        k, v = stack.pop() 
-        if isinstance(v, dict): 
-            if k not in visited: 
-                stack.extend(v.items()) 
-            else: 
-                print("%s: %s" % (k, v)) 
+def myprint(d):
+    """Print a nested dictionary."""
+    stack = list(d.items())
+    visited = set()
+    while stack:
+        k, v = stack.pop()
+        if isinstance(v, dict):
+            if k not in visited:
+                stack.extend(v.items())
+            else:
+                print("%s: %s" % (k, v))
             visited.add(k)
 
-def travtree(hash, level, trace):
-    leftval = -1
-    rightval = -1
-    leftleaf = 0
-    rightleaf = 0
-    for k, v in sorted(hash.items(), key=lambda x: random.random()):
+def travtree(hash_dict, level, trace):
+    """
+    Traverse the binary tree and build the data structure.
+    This function is crucial for creating the MMDB search tree.
+    """
+    global data
+    leftval = rightval = -1
+    leftleaf = rightleaf = 0
+    for k, v in sorted(hash_dict.items(), key=lambda x: random.random()):
         key2 = k
         trace2 = trace + key2
         if isinstance(v, str):
-            if (k == 'x0'):
-                leftval = v
-                leftleaf = 1
-            elif (k == 'x1'):
-                rightval = v
-                rightleaf = 1
+            if k == 'x0':
+                leftval, leftleaf = v, 1
+            elif k == 'x1':
+                rightval, rightleaf = v, 1
         elif isinstance(v, dict):
             tmp = travtree(v, level + 1, trace2)
-            if (k == 'x0'):
+            if k == 'x0':
                 leftval = tmp
-            elif (k == 'x1'):
+            elif k == 'x1':
                 rightval = tmp
-    ownoffset = 0
-    if (level in data):
-        ownoffset = len(data[level])
-    else:
-        data[level] = {}
     
-    data[level][ownoffset] = str(leftval) + '#' + str(rightval)
+    if level not in data:
+        data[level] = {}
+
+    ownoffset = len(data[level])
+    data[level][ownoffset] = f"{leftval}#{rightval}"
     return ownoffset
 
 def custom_sprintf(num1):
+    """Convert an integer to its binary string representation."""
     return format(int(num1), '08b')
 
 def print_double(num):
-    s = struct.pack(">d", float(num))
-    return s
+    """Convert a float to its binary representation."""
+    return struct.pack(">d", float(num))
 
 def print_byte(num):
-    # s = struct.pack('B', int(num))
-    s = struct.pack('I', int(num)).rstrip(b'\x00')
-    return s
+    """Convert an integer to a single byte, removing null bytes."""
+    return struct.pack('I', int(num)).rstrip(b'\x00')
 
 def print_byte1(num):
-    s = struct.pack('B', int(num))
-    return s
+    """Convert an integer to a single byte."""
+    return struct.pack('B', int(num))
 
 def print_uint(num):
-    s = ""
-    while (num > 0):
-        num2 = int(num) & 0xFF 
-        if (isinstance(s, bytes)):
-            s = print_byte(num2) + s
-        else:
-            s = print_byte(num2) + bytes(s.encode())
+    """Convert an unsigned integer to its binary representation."""
+    s = b""
+    while num > 0:
+        num2 = int(num) & 0xFF
+        s = print_byte(num2) + s
         num = int(num) >> 8
-    if (isinstance(s, bytes)):
-        return s
-    else:
-        return bytes(s.encode())
+    return s
 
 def print_pointer(num):
+    """
+    Create a pointer for the MMDB format.
+    This is used to reference data within the database.
+    """
+    global POINTER_TYPE
     pointersize = -1
     threebits = 0
     balance = []
 
-    if (num <= 2047):
+    if num <= 2047:
         pointersize = 0
         threebits = num >> 8
         balance = get_byte_array(num, 1)
-    elif(num <= 526335):
+    elif num <= 526335:
         pointersize = 1
         num = num - 2048
         threebits = num >> 16
         balance = get_byte_array(num, 2)
-    elif(num <= 134744063):
+    elif num <= 134744063:
         pointersize = 2
         num = num - 526336
         threebits = num >> 24
         balance = get_byte_array(num, 3)
-    elif(num <= 4294967295):
+    elif num <= 4294967295:
         pointersize = 3
         threebits = 0
         balance = get_byte_array(num, 4)
@@ -106,54 +151,52 @@ def print_pointer(num):
         raise Exception("Pointer value too large.\n")
 
     pointersize = pointersize << 3
-    controlbyte = pointertype | pointersize | threebits
+    controlbyte = POINTER_TYPE | pointersize | threebits
     s = print_byte(controlbyte)
     for i in range(len(balance)):
         s += print_byte(balance[i])
     return s
 
-def get_byte_array(num, bytes):
+def get_byte_array(num, bytes_count):
+    """Convert a number to an array of bytes."""
     bytesarr = []
-    for i in range(bytes):
+    for i in range(bytes_count):
         tmp = int(num) & 0xFF
         num = int(num) >> 8
-        bytesarr = ([tmp] + bytesarr) # do the unshift staff in Perl
-
+        bytesarr = ([tmp] + bytesarr)
     return bytesarr
 
-def print_node (leftdata, rightdata): 
+def print_node(leftdata, rightdata):
+    """
+    Create a node for the MMDB search tree.
+    The format differs slightly between country and city databases.
+    """
+    global dbtype
     mybytes = []
     leftbytes = []
     rightbytes = []
     
-    if (dbtype == 'country'):
+    if dbtype == 'country':
         leftbytes = get_byte_array(leftdata, 3)
         rightbytes = get_byte_array(rightdata, 3)
         mybytes = leftbytes + rightbytes
-    elif (dbtype == 'city'):
+    elif dbtype == 'city':
         leftbytes = get_byte_array(leftdata, 4)
         rightbytes = get_byte_array(rightdata, 4)
         midbyte = (leftbytes[0] << 4) ^ rightbytes[0]
-        leftbytes_a = leftbytes[0]
-        leftbytes.pop(leftbytes.index(leftbytes_a))
-        rightbytes_a = rightbytes[0]
-        rightbytes.pop(rightbytes.index(rightbytes_a))
+        leftbytes = leftbytes[1:]
+        rightbytes = rightbytes[1:]
         leftbytes.append(midbyte)
         mybytes = leftbytes + rightbytes
     
-    s = ""
+    s = b""
     for i in range(len(mybytes)):
-        if (isinstance(s, bytes)):
-            s += print_byte1(mybytes[i])
-        else:
-            s = print_byte1(mybytes[i]) + bytes(s.encode())
+        s += print_byte1(mybytes[i])
 
     return s
 
 def keys_exists(element, *keys):
-    '''
-    Check if *keys (nested) exists in `element` (dict).
-    '''
+    """Check if a series of keys exists in a nested dictionary."""
     if not isinstance(element, dict):
         raise AttributeError('keys_exists() expects dict as first argument.')
     if len(keys) == 0:
@@ -167,368 +210,265 @@ def keys_exists(element, *keys):
             return False
     return True
 
-# Variables declaration start at here
-tokens = {"country": 0, "iso_code": 0, "names": 0, "en": 0, "-": 0}
-tokens2 = {"city": 0, "location": 0, "postal": 0, "latitude": 0, "longitude": 0, "code": 0, "subdivisions": 0}
-latlongs = {}
-cities = {}
-countries = {}
-cidrdata = []
-sortbylength = {}
-countryoffset = {}
-cityoffset = {}
-btree = {}
-data = {}
-datastartmarker = print_byte1(0) * 16
-datastartmarkerlength = len(datastartmarker)
+def main():
+    global data, dbtype, POINTER_TYPE
+    
+    # 初始化数据结构
+    tokens = {"country": 0, "iso_code": 0, "names": 0, "en": 0, "-": 0}
+    tokens2 = {"city": 0, "location": 0, "postal": 0, "latitude": 0, "longitude": 0, "code": 0, "subdivisions": 0}
+    latlongs = {}
+    cities = {}
+    countries = {}
+    cidrdata = []
+    sortbylength = {}
+    countryoffset = {}
+    cityoffset = {}
+    btree = {}
+    data = {}
+    datastartmarker = print_byte1(0) * 16
+    datastartmarkerlength = len(datastartmarker)
 
-if (len(sys.argv) > 1):
-    filename = sys.argv[1]
-    if(filename.lower().endswith('.csv')):
-        with open(filename, 'r', encoding = 'utf-8') as f:
-            mycsv = csv.reader(f)
-            for row in mycsv:
-                therest = ''
-                if (len(row) == 10):
-                    dbtype = 'city'
-                    for i in range (2,6):
-                        tokens[row[i]] = 0
-                    latlongs[row[6]] = 0
-                    latlongs[row[7]] = 0
-                    tokens[row[8]] = 0
-                    cities[row[2] + "|" + row[3] + "|" + row[4] + "|" + row[5] + "|" + row[6] + "|" + row[7] + "|" + row[8]] = 0
-                    therest = row[2] + "|" + row[4] + "|" + row[5] + "|" + row[6] + "|" + row[7] + "|" + row[8]
-                else:
-                    dbtype = 'country'
-                    countries[row[2]] = row[3]
-                    therest = row[2]
-                fromip = no2ip(row[0])
-                toip = no2ip(row[1])
-                startip = ipaddress.IPv4Address(fromip)
-                endip = ipaddress.IPv4Address(toip)
-                ar = [ipaddr for ipaddr in ipaddress.summarize_address_range(startip, endip)]
-                ar1 = []
-                for i in range(len(ar)):
-                    ar1.append(str(ar[i]))
-                ar1 = sorted(ar1,key=lambda x : [int(m) for m in re.findall("\d+",x)])
-                for i in range(len(ar1)):
-                    cidrdata.append('"' + str(ar1[i]) + '",' + therest)
-        for i in range(len(cidrdata)):
-            regex_here1 = r"^\"([\d\.]+)\/(\d+)\",(.*)"
-            if ((re.search(regex_here1, cidrdata[i]) != None)):
-                matches = re.finditer(regex_here1, cidrdata[i], re.MULTILINE)
-                for matchNum, match in enumerate(matches, start=1):
-                    ip = match.group(1)
-                    cidr = match.group(2)
-                    line_copy1 = match.group(3)
+    if len(sys.argv) > 1:
+        filename = sys.argv[1]
+        if filename.lower().endswith('.csv'):
+            # 读取和处理CSV文件
+            with open(filename, 'r', encoding='utf-8') as f:
+                mycsv = csv.reader(f)
+                for row in tqdm(mycsv, desc="Processing CSV"):
+                    therest = ''
+                    if len(row) == 10:  # 城市级数据
+                        dbtype = 'city'
+                        for i in range(2, 6):
+                            tokens[row[i]] = 0
+                        latlongs[row[6]] = 0
+                        latlongs[row[7]] = 0
+                        tokens[row[8]] = 0
+                        cities["|".join(row[2:9])] = 0
+                        therest = "|".join([row[2], row[4], row[5], row[6], row[7], row[8]])
+                    else:  # 国家级数据
+                        dbtype = 'country'
+                        countries[row[2]] = row[3]
+                        therest = row[2]
+                    
+                    # 处理IP范围
+                    fromip = ip2no(row[0])
+                    toip = ip2no(row[1])
+                    startip = ipaddress.IPv4Address(fromip)
+                    endip = ipaddress.IPv4Address(toip)
+                    ar = [ipaddr for ipaddr in ipaddress.summarize_address_range(startip, endip)]
+                    ar1 = sorted(str(cidr) for cidr in ar)
+                    for cidr in ar1:
+                        cidrdata.append(f'"{cidr}",{therest}')
+
+            # 处理CIDR数据
+            logging.info("Processing CIDR data")
+            for entry in tqdm(cidrdata, desc="Processing CIDR entries"):
+                regex_here1 = r"^\"([\d\.]+)\/(\d+)\",(.*)"
+                match = re.search(regex_here1, entry)
+                if match:
+                    ip, cidr, line_copy1 = match.groups()
                     iparr = ip.split('.')
                     binary = list(map(custom_sprintf, iparr))
                     binarystr = "".join(binary)
                     binarystrcidr = binarystr[0:int(cidr)]
                     sortbylength["GG" + binarystrcidr] = line_copy1
-        datasection = b""
-        stringtype = 2 << 5
-        maptype = 7 << 5
-        pointertype = 1 << 5
-        uint16type = 5 << 5
-        uint32type = 6 << 5
-        uint64type = 9 - 7
-        arraytype = 11 - 7
-        extendedtype = 0
-        doubletype = 3 << 5
-        if (dbtype == 'city'):
-            newHash = {**tokens, **tokens2} 
-            tokens = newHash
-        for key in sorted(tokens):
-            tokens[key] = len(datasection)
-            tokenlength = len(key)
-            controlbyte = stringtype | tokenlength
-            datasection += print_byte(controlbyte) + bytes(key.encode())
-        for key1 in sorted(latlongs):
-            # print (key1)
-            latlongs[key1] = len(datasection)
-            controlbyte1 = doubletype | 8
-            datasection += print_byte(controlbyte1) + print_double(key1)
-        if (dbtype == 'country'):
-            for key2 in sorted(countries):
-                countryoffset[key2] = len(datasection)
-                
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["country"])
-                
-                controlbyte = maptype | 2
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["iso_code"])
-                
-                tokenlength = len(key2)
-                controlbyte = stringtype | tokenlength
-                datasection += print_byte(controlbyte) + bytes(key2.encode())
-                datasection += print_pointer(tokens["names"])
-                
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["en"])
-                
-                countryname = countries[key2]
-                tokenlength = len(countryname)
-                controlbyte = stringtype | tokenlength
-                datasection += print_byte(controlbyte) + bytes(countryname.encode())
-        elif (dbtype == 'city'):
-            for key2 in sorted(cities):
-                array = key2.split('|')
-                countrycode = array[0]
-                countryname = array[1]
-                statename = array[2]
-                cityname = array[3]
-                latitude = array[4]
-                longitude = array[5]
-                postcode = array[6]
-                cityoffset[countrycode + "|" + statename + "|" + cityname + "|" + latitude + "|" + longitude + "|" + postcode] = len(datasection)
-                controlbyte = maptype | 5
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["city"])
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["names"])
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["en"])
-                datasection += print_pointer(tokens[cityname])
-                
-                datasection += print_pointer(tokens["country"])
-                controlbyte = maptype | 2
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["iso_code"])
-                datasection += print_pointer(tokens[countrycode])
-                datasection += print_pointer(tokens["names"])
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["en"])
-                datasection += print_pointer(tokens[countryname])
-                
-                datasection += print_pointer(tokens["location"])
-                controlbyte = maptype | 2
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["latitude"])
-                datasection += print_pointer(latlongs[latitude])
-                datasection += print_pointer(tokens["longitude"])
-                datasection += print_pointer(latlongs[longitude])
-                
-                datasection += print_pointer(tokens["postal"])
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["code"])
-                datasection += print_pointer(tokens[postcode])
-                
-                datasection += print_pointer(tokens["subdivisions"])
-                myint = 1
-                controlbyte = extendedtype | myint
-                typebyte = arraytype
-                datasection += print_byte(controlbyte) + print_byte(typebyte)
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["names"])
-                controlbyte = maptype | 1
-                datasection += print_byte(controlbyte)
-                datasection += print_pointer(tokens["en"])
-                datasection += print_pointer(tokens[statename])
-        for binarystrcidr in sorted(sortbylength):
-            tmp = binarystrcidr
-            tmp_modify = re.sub('GG', '', tmp)
-            myarr = list(tmp_modify)
-            key1_tmp = ''
-            key1_tmp1 = ''
-            code = 'btree'
-            code1 = 'btree'
-            for i in range(len(myarr)):
-                code += '["x' + myarr[i] + '"]'
-                key1 = 'x' + myarr[i]
-                key1_tmp2 = 'x' + myarr[i]
-                key1_tmp += '["x' + myarr[i] + '"]'
-                key1_tmp1_list = key1_tmp1.split(',')
-                for j in range(len(key1_tmp1_list)):
-                    if (key1_tmp1_list[j] != ''):
-                        code1 += '[' + key1_tmp1_list[j] + ']'
-                if (key1_tmp1 == ''):
-                    key1_tmp1 += '"' + key1 + '"'
-                else:
-                    key1_tmp1 += ',"' + key1 + '"'
-                code2 = 'result123 = keys_exists(btree, ' + key1_tmp1 + ')'
-                exec(code2)
-                if (result123 == False):
-                    code1 += '.setdefault("x' + myarr[i] + '", {})'
-                    exec (code1)
-                    code1 = 'btree'
-                else:
-                    code1 = 'btree'
-            code += ' = "' + sortbylength[binarystrcidr] + '"'
-            exec (code)
-            key1_tmp = ''
-            key1_tmp1 = ''
-        travtree(btree, 0, '')
-        totalnodes = 0
-        offsetnodes = {}
-        for i in range(len(data)):
-            nodes = len(data[i])
-            totalnodes += nodes
-            offsetnodes[i] = totalnodes
-        # Start to write into file
-        filename2 = filename + '.MMDB'
-        f = open(filename2,'wb')
-        for i in range(len(data)):
-            datalevel = len(data[i])
-            for y in range(datalevel):
-                nodedata = data[i][y]
-                regex = r"^(.*)\#(.*)$"
-                if ((re.search(regex, nodedata) != None)):
-                    matches = re.finditer(regex, nodedata, re.MULTILINE)
-                    for matchNum, match in enumerate(matches, start=1):
-                        left = match.group(1)
-                        right = match.group(2)
-                        leftdata = 0
-                        rightdata = 0
-                        if (re.search(r"^\d+$", left) != None):
-                            left_int = int(left)
-                            left_int += offsetnodes[i]
-                            leftdata = str(left_int)
-                        else:
-                            if (dbtype == 'country'):
-                                if ((left.replace('-','',1).isdigit()) and (int(left) < 0)):
-                                    leftdata = 0 + datastartmarkerlength + totalnodes
-                                else:
-                                    leftdata = countryoffset[left] + datastartmarkerlength + totalnodes
-                            elif (dbtype == 'city'):
-                                if ((left.replace('-','',1).isdigit()) and (int(left) < 0)):
-                                    leftdata = 0 + datastartmarkerlength + totalnodes
-                                else:
-                                    leftdata = cityoffset[left] + datastartmarkerlength + totalnodes
-                        if (re.search(r"^\d+$", right) != None):
-                            right_int = int(right)
-                            right_int += offsetnodes[i]
-                            rightdata = str(right_int)
-                        else:
-                            if (dbtype == 'country'):
-                                if ((right.replace('-','',1).isdigit()) and (int(right) < 0)):
-                                    rightdata = 0 + datastartmarkerlength + totalnodes
-                                else:
-                                    rightdata = countryoffset[right] + datastartmarkerlength + totalnodes
-                            elif (dbtype == 'city'):
-                                if ((right.replace('-','',1).isdigit()) and (int(right) < 0)):
-                                    rightdata = 0 + datastartmarkerlength + totalnodes
-                                else:
-                                    rightdata = cityoffset[right] + datastartmarkerlength + totalnodes
-                    f.write(print_node(leftdata, rightdata))
-        f.write(datastartmarker)
-        f.write(datasection)
-        f.write(binascii.unhexlify(b'ABCDEF4D61784D696E642E636F6D'))
-        controlbyte = maptype | 9
-        f.write(print_byte(controlbyte))
-        field = "binary_format_major_version"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        myint = 2
-        myint = print_uint(myint)
-        intbytes = len(myint)
-        controlbyte = uint16type | intbytes
-        f.write(print_byte(controlbyte) + myint)
-        field = "binary_format_minor_version"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        myint = 0
-        myint = print_uint(myint)
-        intbytes = len(myint)
-        controlbyte = uint16type | intbytes
-        f.write(print_byte(controlbyte) + myint)
-        field = "build_epoch"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        myint = time.time()
-        myint = print_uint(myint)
-        intbytes = len(myint)
-        controlbyte = extendedtype | intbytes
-        typebyte = uint64type
-        f.write(print_byte(controlbyte) + print_byte(typebyte) + myint)
-        field = "database_type"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        if (dbtype == 'country'):
-            field = "IP2LITE-Country"
-        else:
-            field = "IP2LITE-City"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        field = "description"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        controlbyte = maptype | 1
-        f.write(print_byte(controlbyte))
-        field = "en"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        if (dbtype == 'country'):
-            field = "IP2LITE-Country database"
-        else:
-            field = "IP2LITE-City database"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        field = "ip_version"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        myint = 4
-        myint = print_uint(myint)
-        intbytes = len(myint)
-        controlbyte = uint16type | intbytes
-        f.write(print_byte(controlbyte) + myint)
-        field = "languages"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        myint = 1
-        controlbyte = extendedtype | myint
-        typebyte = arraytype
-        f.write(print_byte(controlbyte) + print_byte(typebyte))
-        field = "en"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        field = "node_count"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        myint = totalnodes
-        myint = print_uint(myint)
-        intbytes = len(myint)
-        controlbyte = uint32type | intbytes
-        f.write(print_byte(controlbyte) + myint)
-        field = "record_size"
-        fieldlength = len(field)
-        controlbyte = stringtype | fieldlength
-        f.write(print_byte(controlbyte) + bytes(field.encode()))
-        if (dbtype == 'country'):
-            myint = 24
-        else:
-            myint = 28
-        myint = print_uint(myint)
-        intbytes = len(myint)
-        controlbyte = uint32type | intbytes
-        f.write(print_byte(controlbyte) + myint)
-        f.close()
-        print ("You have successfully converted",filename,"to",filename2,".\n")
-        print ("You can now use the",filename2,"with any MaxMind API which supports the GeoLite2 format.\n")
 
+            # 构建数据部分
+            logging.info("Constructing data section")
+            datasection = b""
+            if dbtype == 'city':
+                tokens.update(tokens2)
+
+            for key in tqdm(sorted(tokens), desc="Processing tokens"):
+                tokens[key] = len(datasection)
+                tokenlength = len(key)
+                controlbyte = STRING_TYPE | tokenlength
+                datasection += print_byte(controlbyte) + key.encode()
+
+            for key1 in tqdm(sorted(latlongs), desc="Processing lat/long"):
+                latlongs[key1] = len(datasection)
+                controlbyte1 = DOUBLE_TYPE | 8
+                datasection += print_byte(controlbyte1) + print_double(float(key1))
+
+            # 处理国家或城市数据
+            if dbtype == 'country':
+                for key2 in tqdm(sorted(countries), desc="Processing countries"):
+                    countryoffset[key2] = len(datasection)
+                    
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["country"])
+                    
+                    controlbyte = MAP_TYPE | 2
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["iso_code"])
+                    
+                    tokenlength = len(key2)
+                    controlbyte = STRING_TYPE | tokenlength
+                    datasection += print_byte(controlbyte) + key2.encode()
+                    datasection += print_pointer(tokens["names"])
+                    
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["en"])
+                    
+                    countryname = countries[key2]
+                    tokenlength = len(countryname)
+                    controlbyte = STRING_TYPE | tokenlength
+                    datasection += print_byte(controlbyte) + countryname.encode()
+            elif dbtype == 'city':
+                for key2 in tqdm(sorted(cities), desc="Processing cities"):
+                    array = key2.split('|')
+                    countrycode, countryname, statename, cityname, latitude, longitude, postcode = array
+                    cityoffset[f"{countrycode}|{statename}|{cityname}|{latitude}|{longitude}|{postcode}"] = len(datasection)
+                    controlbyte = MAP_TYPE | 5
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["city"])
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["names"])
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["en"])
+                    datasection += print_pointer(tokens[cityname])
+                    
+                    datasection += print_pointer(tokens["country"])
+                    controlbyte = MAP_TYPE | 2
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["iso_code"])
+                    datasection += print_pointer(tokens[countrycode])
+                    datasection += print_pointer(tokens["names"])
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["en"])
+                    datasection += print_pointer(tokens[countryname])
+                    
+                    datasection += print_pointer(tokens["location"])
+                    controlbyte = MAP_TYPE | 2
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["latitude"])
+                    datasection += print_pointer(latlongs[latitude])
+                    datasection += print_pointer(tokens["longitude"])
+                    datasection += print_pointer(latlongs[longitude])
+                    
+                    datasection += print_pointer(tokens["postal"])
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["code"])
+                    datasection += print_pointer(tokens[postcode])
+                    datasection += print_pointer(tokens["subdivisions"])
+                    myint = 1
+                    controlbyte = EXTENDED_TYPE | myint
+                    typebyte = ARRAY_TYPE
+                    datasection += print_byte(controlbyte) + print_byte(typebyte)
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["names"])
+                    controlbyte = MAP_TYPE | 1
+                    datasection += print_byte(controlbyte)
+                    datasection += print_pointer(tokens["en"])
+                    datasection += print_pointer(tokens[statename])
+
+            # 更新B树
+            logging.info("Updating B-tree")
+            for binarystrcidr in tqdm(sorted(sortbylength), desc="Updating B-tree"):
+                tmp_modify = binarystrcidr[2:]
+                current = btree
+                for bit in tmp_modify:
+                    key = 'x' + bit
+                    if key not in current:
+                        current[key] = {}
+                    current = current[key]
+                current[key] = sortbylength[binarystrcidr]
+
+            # 遍历B树并构建搜索树
+            logging.info("Traversing B-tree")
+            travtree(btree, 0, '')
+
+            # 计算节点总数和偏移量
+            totalnodes = sum(len(level) for level in data.values())
+            offsetnodes = {i: sum(len(data[j]) for j in range(i+1)) for i in range(len(data))}
+
+            # 写入MMDB文件
+            logging.info("Writing to file")
+            filename2 = filename + '.MMDB'
+            with open(filename2, 'wb') as f:
+                # 写入搜索树节点
+                for i in tqdm(range(len(data)), desc="Writing nodes"):
+                    for nodedata in data[i].values():
+                        left, right = map(str, nodedata.split('#'))
+                        leftdata = rightdata = 0
+                        if left.isdigit():
+                            leftdata = int(left) + offsetnodes[i]
+                        else:
+                            if dbtype == 'country':
+                                leftdata = countryoffset.get(left, 0) + datastartmarkerlength + totalnodes if not (left.replace('-','',1).isdigit() and int(left) < 0) else datastartmarkerlength + totalnodes
+                            elif dbtype == 'city':
+                                leftdata = cityoffset.get(left, 0) + datastartmarkerlength + totalnodes if not (left.replace('-','',1).isdigit() and int(left) < 0) else datastartmarkerlength + totalnodes
+                        
+                        if right.isdigit():
+                            rightdata = int(right) + offsetnodes[i]
+                        else:
+                            if dbtype == 'country':
+                                rightdata = countryoffset.get(right, 0) + datastartmarkerlength + totalnodes if not (right.replace('-','',1).isdigit() and int(right) < 0) else datastartmarkerlength + totalnodes
+                            elif dbtype == 'city':
+                                rightdata = cityoffset.get(right, 0) + datastartmarkerlength + totalnodes if not (right.replace('-','',1).isdigit() and int(right) < 0) else datastartmarkerlength + totalnodes
+                        
+                        f.write(print_node(leftdata, rightdata))
+
+                # 写入数据开始标记和数据部分
+                f.write(datastartmarker)
+                f.write(datasection)
+                f.write(binascii.unhexlify(b'ABCDEF4D61784D696E642E636F6D'))
+
+                # 写入元数据
+                controlbyte = MAP_TYPE | 9
+                f.write(print_byte(controlbyte))
+
+                metadata = {
+                    "binary_format_major_version": 2,
+                    "binary_format_minor_version": 0,
+                    "build_epoch": int(time.time()),
+                    "database_type": f"IP2LITE-{dbtype.capitalize()}",
+                    "description": {"en": f"IP2LITE-{dbtype.capitalize()} database"},
+                    "ip_version": 4,
+                    "languages": ["en"],
+                    "node_count": totalnodes,
+                    "record_size": 24 if dbtype == 'country' else 28
+                }
+
+                # 写入每个元数据字段
+                for key, value in metadata.items():
+                    f.write(print_byte(STRING_TYPE | len(key)) + key.encode())
+                    if isinstance(value, int):
+                        if value < 256:
+                            f.write(print_byte(UINT16_TYPE | 1) + print_byte(value))
+                        elif value < 65536:
+                            f.write(print_byte(UINT16_TYPE | 2) + print_uint(value))
+                        elif value < 4294967296:
+                            f.write(print_byte(UINT32_TYPE | 4) + print_uint(value))
+                        else:
+                            f.write(print_byte(EXTENDED_TYPE | 8) + print_byte(UINT64_TYPE) + print_uint(value))
+                    elif isinstance(value, str):
+                        f.write(print_byte(STRING_TYPE | len(value)) + value.encode())
+                    elif isinstance(value, dict):
+                        f.write(print_byte(MAP_TYPE | len(value)))
+                        for sub_key, sub_value in value.items():
+                            f.write(print_byte(STRING_TYPE | len(sub_key)) + sub_key.encode())
+                            f.write(print_byte(STRING_TYPE | len(sub_value)) + sub_value.encode())
+                    elif isinstance(value, list):
+                        f.write(print_byte(EXTENDED_TYPE | 1) + print_byte(ARRAY_TYPE))
+                        for item in value:
+                            f.write(print_byte(STRING_TYPE | len(item)) + item.encode())
+
+            logging.info(f"You have successfully converted {filename} to {filename2}.")
+            print(f"You can now use {filename2} with any MaxMind API which supports the GeoLite2 format.\n")
+
+        else:
+            raise Exception('Only .csv files are accepted.')
     else:
-        raise Exception('Only .csv file are accepted.')
-else:
-    print ("Usage: python3 convert.py <IP2Location LITE DB1 or DB11 CSV file>\n")
-    raise Exception('Please enter a filename.')
+        print("Usage: python3 convert.py <IP2Location LITE DB1 or DB11 CSV file>\n")
+        raise Exception('Please enter a filename.')
 
+if __name__ == '__main__':
+    main()
