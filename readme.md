@@ -1,11 +1,11 @@
 # IP2Location to MaxMind MMDB Converter
 
-This project provides a Python script to convert IP2Location LITE CSV database to MaxMind MMDB (GeoIP2) format. It supports both country-level and city-level databases.
+This project provides a Python script to convert IP2Location CSV database to MaxMind MMDB (GeoIP2) format. It supports city-level databases with comprehensive information including ISP.
 
 ## Features
 
-- Converts IP2Location LITE CSV to MaxMind MMDB format
-- Supports both country and city level databases
+- Converts IP2Location CSV to MaxMind MMDB format
+- Supports detailed city-level databases
 - Efficient processing with progress bars
 - Generates MMDB files compatible with MaxMind GeoIP2 APIs
 
@@ -13,6 +13,8 @@ This project provides a Python script to convert IP2Location LITE CSV database t
 
 - Python 3.5+
 - tqdm library (for progress bars)
+- netaddr library (for IP address management)
+- mmdb-writer library (for creating MMDB files)
 
 ## Installation
 
@@ -24,12 +26,12 @@ This project provides a Python script to convert IP2Location LITE CSV database t
 
 2. Install the required dependencies:
    ```
-   pip install tqdm
+   pip install tqdm netaddr mmdb-writer
    ```
 
 ## Usage
 
-1. Download the IP2Location LITE CSV database (DB1 for country-level or DB11 for city-level) from [IP2Location LITE](https://lite.ip2location.com/ip2location-lite).
+1. Download the IP2Location CSV database from [IP2Location](https://www.ip2location.com).
 
 2. Run the conversion script:
    ```
@@ -41,18 +43,18 @@ This project provides a Python script to convert IP2Location LITE CSV database t
 ## Example
 
 ```
-python convert.py IP2LOCATION-LITE-DB1.CSV
+python convert.py /path/to/IP-COUNTRY-REGION-CITY-LATITUDE-LONGITUDE-ISP.CSV
 ```
 
-This will generate `IP2LOCATION-LITE-DB1.CSV.MMDB` in the same directory.
+This will generate `ip2location.mmdb` in the same directory.
 
 ## Output
 
-The generated MMDB file can be used with any MaxMind API that supports the GeoLite2 format.
+The generated MMDB file can be used with any MaxMind API that supports the GeoIP2 format.
 
 ## Notes
 
-- This script is based on the work by [antonvlad999](https://github.com/antonvlad999/convert-ip2location-geolite2) and has been modified for improved performance and usability.
+- This script has been improved for better performance and usability.
 - The conversion process may take some time depending on the size of the input database.
 
 ## License
